@@ -279,7 +279,8 @@ class BuildingRag:
     def ingest_to_neo4j(self, batch_size=100, limit=None):
         """Load chunks from SQLite to Neo4j with embeddings"""
         from sentence_transformers import SentenceTransformer
-        from tqdm import tqdm
+        from tqdm import tqdm        
+        from dotenv import load_dotenv
         
         print("\n📊 Starting Neo4j ingestion...")
         
@@ -299,8 +300,12 @@ class BuildingRag:
         cursor.execute(query)
         total = cursor.fetchone()[0]
         
-        # Fetch chunks
-        query = "SELECT rowid, id, chunk_id, chunk_text FROM document_chunks"
+        # Fetch chunks with document URLs
+        query = """
+            SELECT dc.rowid, dc.id, dc.chunk_id, dc.chunk_text, d.url
+            FROM document_chunks dc
+            LEFT JOIN documents d ON dc.id = d.id
+        """
         if limit:
             query += f" LIMIT {limit}"
         cursor.execute(query)
@@ -309,7 +314,7 @@ class BuildingRag:
         processed = 0
         
         for row in tqdm(cursor, total=total, desc="Ingesting chunks"):
-            chunk_rowid, doc_id, chunk_id, text = row
+            chunk_rowid, doc_id, chunk_id, text, url = row
             
             # Generate embedding
             embedding = embedding_model.encode(text).tolist()
@@ -319,6 +324,7 @@ class BuildingRag:
                 'doc_id': doc_id,
                 'chunk_id': chunk_id,
                 'text': text,
+                'url': url or '',
                 'embedding': embedding
             })
             
@@ -341,10 +347,12 @@ class BuildingRag:
             session.run("""
                 UNWIND $batch AS row
                 MERGE (d:Document {id: row.doc_id})
+                SET d.url = row.url
                 MERGE (c:Chunk {id: row.chunk_rowid})
                 SET c.doc_id = row.doc_id,
                     c.chunk_id = row.chunk_id,
                     c.text = row.text,
+                    c.url = row.url,
                     c.embedding = row.embedding
                 MERGE (d)-[:HAS_CHUNK]->(c)
             """, batch=batch)
@@ -386,7 +394,7 @@ class BuildingRag:
             result = session.run("""
                 CALL db.index.vector.queryNodes('chunk_embeddings', $k, $query_embedding)
                 YIELD node, score
-                RETURN node.text AS text, node.id AS id, score
+                RETURN node.text AS text, node.url AS url, node.id AS id, score
                 ORDER BY score DESC
             """, k=k, query_embedding=query_embedding)
             
@@ -394,6 +402,7 @@ class BuildingRag:
             for record in result:
                 results.append({
                     'text': record['text'],
+                    'url': record['url'],
                     'id': record['id'],
                     'score': record['score']
                 })
@@ -418,21 +427,22 @@ class BuildingRag:
             
             seed_ids = seed_result.single()['seed_ids']
             
-            # Expand via graph
-            result = session.run("""
+            # Expand via graph - using f-string for depth since Cypher doesn't allow parameterized variable-length paths
+            result = session.run(f"""
                 MATCH (seed:Chunk)
                 WHERE seed.id IN $seed_ids
-                MATCH path = (seed)-[:SIMILAR_TO*1..$depth]-(related:Chunk)
+                MATCH path = (seed)-[:SIMILAR_TO*1..{depth}]-(related:Chunk)
                 WITH DISTINCT related, length(path) AS distance
-                RETURN related.text AS text, related.id AS id, distance
+                RETURN related.text AS text, related.url AS url, related.id AS id, distance
                 ORDER BY distance ASC
                 LIMIT 20
-            """, seed_ids=seed_ids, depth=depth)
+            """, seed_ids=seed_ids)
             
             results = []
             for record in result:
                 results.append({
                     'text': record['text'],
+                    'url': record['url'],
                     'id': record['id'],
                     'distance': record['distance']
                 })
@@ -447,24 +457,26 @@ class BuildingRag:
         query_embedding = model.encode(query_text).tolist()
         
         with self.neo4j_driver.session() as session:
-            result = session.run("""
+            # Using f-string for depth since Cypher doesn't allow parameterized variable-length paths
+            result = session.run(f"""
                 // Vector search for initial nodes
                 CALL db.index.vector.queryNodes('chunk_embeddings', $k, $query_embedding)
                 YIELD node AS seed, score
                 
                 // Expand via graph
-                OPTIONAL MATCH (seed)-[:SIMILAR_TO*1..$depth]-(related:Chunk)
+                OPTIONAL MATCH (seed)-[:SIMILAR_TO*1..{expand_depth}]-(related:Chunk)
                 
                 // Return unique chunks with scores
                 WITH seed, score, collect(DISTINCT related) AS neighbors
                 UNWIND neighbors + [seed] AS chunk
                 
-                RETURN DISTINCT chunk.text AS text, 
+                RETURN DISTINCT chunk.text AS text,
+                       chunk.url AS url, 
                        chunk.id AS id,
                        score
                 ORDER BY score DESC
                 LIMIT 20
-            """, k=k_vector, query_embedding=query_embedding, depth=expand_depth)
+            """, k=k_vector, query_embedding=query_embedding)
             
             results = []
             seen_ids = set()
@@ -472,6 +484,7 @@ class BuildingRag:
                 if record['id'] not in seen_ids:
                     results.append({
                         'text': record['text'],
+                        'url': record['url'],
                         'id': record['id'],
                         'score': record.get('score', 0)
                     })
@@ -484,4 +497,3 @@ class BuildingRag:
         if hasattr(self, 'neo4j_driver'):
             self.neo4j_driver.close()
             print("🔒 Neo4j connection closed")
-    BuildingRag().know_data()

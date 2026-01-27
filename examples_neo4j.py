@@ -31,12 +31,13 @@ def example_vector_search():
     rag.setup_neo4j_graph()
     
     print("\n=== Vector Search ===")
-    query = "SAP integration configuration"
+    query =input("Enter your question: ") 
     results = rag.vector_search(query, k=5)
     
     for i, result in enumerate(results, 1):
         print(f"\n{i}. Score: {result['score']:.3f}")
-        print(f"   {result['text'][:200]}...")
+        print(f"   URL: {result.get('url', 'N/A')}")
+        print(f"   Text: {result['text']}")
     
     rag.close_neo4j()
 
@@ -46,27 +47,30 @@ def example_graph_search():
     rag.setup_neo4j_graph()
     
     print("\n=== Graph Search ===")
-    query = "SAP integration configuration"
-    results = rag.graph_search(query, k_seeds=3, depth=2)
-    
+    query =input("Enter your question: ") 
+    print("QUESTION:",query)
+    results = rag.graph_search(query, k_seeds=4, depth=1)
+    starting
     for i, result in enumerate(results, 1):
         print(f"\n{i}. Distance: {result['distance']}")
-        print(f"   {result['text'][:200]}...")
+        print(f"   URL: {result.get('url', 'N/A')}")
+        print(f"   Text: {result['text']}")
     
     rag.close_neo4j()
 
 def example_hybrid_search():
-   """Hybrid search example (vector + graph)"""
+    """Hybrid search example (vector + graph)"""
     rag = BuildingRag()
     rag.setup_neo4j_graph()
     
     print("\n=== Hybrid Search ===")
-    query = "SAP integration configuration"
+    query =input("Enter your question: ") 
     results = rag.hybrid_search(query, k_vector=5, expand_depth=1)
     
     for i, result in enumerate(results, 1):
         print(f"\n{i}. Score: {result['score']:.3f}")
-        print(f"   {result['text'][:200]}...")
+        print(f"   URL: {result.get('url', 'N/A')}")
+        print(f"   Text: {result['text']}")
     
     rag.close_neo4j()
 
