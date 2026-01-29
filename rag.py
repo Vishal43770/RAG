@@ -133,4 +133,5 @@ class BuildingRag:
         pass
 
 if __name__ == "__main__":
-    BuildingRag().know_data()
+     BuildingRag().know_data()
+ 

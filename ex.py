@@ -425,7 +425,7 @@ class BuildingRag:
                 RETURN collect(node.id) AS seed_ids
             """, k=k_seeds, query_embedding=query_embedding)
             
-            seed_ids = seed_result.single()['seed_ids']
+            seed_ids = seed_result.single()['seed_ids'] 
             
             # Expand via graph - using f-string for depth since Cypher doesn't allow parameterized variable-length paths
             result = session.run(f"""
@@ -497,3 +497,43 @@ class BuildingRag:
         if hasattr(self, 'neo4j_driver'):
             self.neo4j_driver.close()
             print("🔒 Neo4j connection closed")
+    
+    def check_neo4j_data_exists(self):
+        """Check if Neo4j already has data ingested"""
+        with self.neo4j_driver.session() as session:
+            result = session.run("MATCH (c:Chunk) RETURN count(c) AS count")
+            count = result.single()['count']
+            return count > 0
+    
+    def get_neo4j_stats(self):
+        """Get current Neo4j database statistics"""
+        with self.neo4j_driver.session() as session:
+            # Count chunks
+            chunk_result = session.run("MATCH (c:Chunk) RETURN count(c) AS count")
+            chunk_count = chunk_result.single()['count']
+            
+            # Count documents
+            doc_result = session.run("MATCH (d:Document) RETURN count(d) AS count")
+            doc_count = doc_result.single()['count']
+            
+            # Count similarity edges
+            edge_result = session.run("MATCH ()-[r:SIMILAR_TO]->() RETURN count(r) AS count")
+            edge_count = edge_result.single()['count']
+            
+            return {
+                'chunks': chunk_count,
+                'documents': doc_count,
+                'similarity_edges': edge_count
+            }
+    
+    def clear_neo4j_data(self):
+        """Clear all data from Neo4j (use with caution!)"""
+        print("⚠️  WARNING: This will delete ALL data from Neo4j!")
+        confirm = input("Type 'yes' to confirm: ")
+        if confirm.lower() != 'yes':
+            print("❌ Cancelled")
+            return
+        
+        with self.neo4j_driver.session() as session:
+            session.run("MATCH (n) DETACH DELETE n")
+            print("🗑️  All Neo4j data deleted")
