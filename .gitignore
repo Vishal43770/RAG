@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 databases/
 analyze_content.py
+/home/vishal/myfiles/rag/.env

@@ -61,12 +61,10 @@ def example_graph_search():
     query =input("Enter your question: ") 
     print("QUESTION:",query)
     results = rag.graph_search(query, k_seeds=4, depth=1)
-    
     for i, result in enumerate(results, 1):
         print(f"\n{i}. Distance: {result['distance']}")
         print(f"   URL: {result.get('url', 'N/A')}")
         print(f"   Text: {result['text']}")
-    
     rag.close_neo4j()
 
 def example_hybrid_search():
@@ -76,13 +74,11 @@ def example_hybrid_search():
     
     print("\n=== Hybrid Search ===")
     query =input("Enter your question: ") 
-    results = rag.hybrid_search(query, k_vector=5, expand_depth=1)
-    
+    results = rag.hybrid_search(query, k_vector=5, expand_depth=1)    
     for i, result in enumerate(results, 1):
         print(f"\n{i}. Score: {result['score']:.3f}")
         print(f"   URL: {result.get('url', 'N/A')}")
-        print(f"   Text: {result['text']}")
-    
+        print(f"   Text: {result['text']}")    
     rag.close_neo4j()
 
 def example_stats():
@@ -113,8 +109,9 @@ if __name__ == "__main__":
         print("  python examples_neo4j.py setup       # Initial setup and ingestion")
         print("  python examples_neo4j.py stats       # Show database statistics")
         print("  python examples_neo4j.py vector      # Vector search demo")
-        print("  python examples_neo4j.py graph       # Graph search demo")
-        print("  python examples_neo4j.py hybrid      # Hybrid search demo")
+  except Exception as e:
+        print(f"⚠️ Failed to chunk doc {doc_id}: {e}")
+        conn.rollback()  # Roll back this document only        print("  python examples_neo4j.py hybrid      # Hybrid search demo")
         print("  python examples_neo4j.py clear       # Clear all data (requires confirmation)")
         sys.exit(1)
     
