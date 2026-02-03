@@ -6,3 +6,6 @@ __pycache__/
 databases/
 analyze_content.py
 /home/vishal/myfiles/rag/.env
+/home/vishal/myfiles/rag/.env.example
+/home/vishal/myfiles/rag/setup_neo4j.sh
+/home/vishal/myfiles/rag/start_rag.sh
