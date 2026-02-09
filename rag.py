@@ -1,16 +1,25 @@
 import os
 import pandas as pd
 import sqlite3
+import ollama
 from sentence_transformers import SentenceTransformer
+from neo4j import GraphDatabase
+from dotenv import load_dotenv
+import torch 
+from tqdm import tqdm
+import numpy as np
+import re
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+
 
 class BuildingRag:
     def __init__(self):
         self.neo4j_driver = None
-        import torch
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
         print(f"✅ Model loaded on: {device.upper()}")
         print("Using device:", self.embedding_model.device)
+
     def know_data(self):
         os.makedirs("databases", exist_ok=True)
         dbpath = "databases/merged.db"
@@ -109,11 +118,10 @@ class BuildingRag:
             length_function=len,
             is_separator_regex=["\n","\n\n",".",",",""],
         )
-        join="\n".join(scene_splitter.split_text())
         dbpath = "databases/merged.db"
         conn = sqlite3.connect(dbpath)
         cursor = conn.cursor()
-        if dbpath.exists():
+        if os.path.exists(dbpath):
             pass
         else:
             cursor.execute("""
@@ -121,7 +129,7 @@ class BuildingRag:
                 id INTEGER NOT NULL,
                 chunk_id INTEGER NOT NULL,
                 chunk_text TEXT not NULL,
-                embedding BLOB, not NULL
+                embedding BLOB not NULL,
                 FOREIGN KEY (id) REFERENCES documents(id)
             ) """)
         cursor.execute(""" select id , cleaned_content from documents;
@@ -153,9 +161,6 @@ class BuildingRag:
         conn.close()
         
     def neo4_setup(self):
-        from neo4j import GraphDatabase
-        from dotenv import load_dotenv
-        
         load_dotenv()
         
         self.neo4j_driver = GraphDatabase.driver(
@@ -178,114 +183,111 @@ class BuildingRag:
                     `vector.similarity_function`: 'cosine'
                 }}
     """)
-def ingest_to_neo4j(self, batch_size=100, limit=None):
-    """Load chunks from SQLite to Neo4j with embeddings - RESUMABLE"""
-    from tqdm import tqdm
-    import torch
-    embedding_model = self.embedding_model
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f"\n📊 Starting Neo4j ingestion using device: {device.upper()}")
-    self.neo4_setup()
-    conn = sqlite3.connect("databases/merged.db")
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS ingestion_progress (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            last_chunk_rowid INTEGER DEFAULT 0)""")
-    cursor.execute("INSERT OR IGNORE INTO ingestion_progress (id, last_chunk_rowid) VALUES (1, 0)")
-    conn.commit()
-    cursor.execute("SELECT last_chunk_rowid FROM ingestion_progress WHERE id = 1")
-    start_rowid = cursor.fetchone()[0]
-    if start_rowid > 0:
-        print(f"🔄 RESUMING from chunk rowid: {start_rowid:,}")
-    else:
-        print("🆕 Starting fresh ingestion")    
-    query = "SELECT COUNT(*) FROM document_chunks WHERE rowid > ?"
-    cursor.execute(query, (start_rowid,))
-    total = cursor.fetchone()[0]
-    print(f"Total chunks to process: {total:,}")
-    if total == 0:
-        print("✅ Nothing to process - already complete!")
-        conn.close()
-        return
-    processed = 0
-    last_rowid = start_rowid
-    try:
-        with tqdm(total=total, desc="Ingesting chunks") as pbar:
-            while True:
-                # ✅ Fetch embedding column from database
-                query = """
-                    SELECT dc.rowid, dc.id, dc.chunk_id, dc.chunk_text, d.url, dc.embedding
-                    FROM document_chunks dc
-                    LEFT JOIN documents d ON dc.id = d.id
-                    WHERE dc.rowid > ?
-                    ORDER BY dc.rowid
-                    LIMIT ?
-                """
-                cursor.execute(query, (last_rowid, batch_size))
-                batch_rows = cursor.fetchall()
-                if not batch_rows:
-                    break
-                
-                # ✅ Separate rows with/without embeddings
-                texts_to_encode = []
-                indices_to_encode = []
-                
-                for i, row in enumerate(batch_rows):
-                    chunk_rowid, doc_id, chunk_id, text, url, existing_embedding = row
-                    if not text:
-                        continue
-                    # Check if embedding exists
-                    if existing_embedding is None:
-                        texts_to_encode.append(text)
-                        indices_to_encode.append(i)
-                
-                # ✅ Only generate embeddings if needed
-                new_embeddings = {}
-                if texts_to_encode:
-                    print(f"  Generating {len(texts_to_encode)} missing embeddings...")
-                    embeddings = embedding_model.encode(texts_to_encode, batch_size=32, show_progress_bar=False)
-                    new_embeddings = dict(zip(indices_to_encode, embeddings))
-                
-                # ✅ Build Neo4j batch (use existing or new embeddings)
-                neo4j_batch = []
-                for i, row in enumerate(batch_rows):
-                    chunk_rowid, doc_id, chunk_id, text, url, existing_embedding = row
-                    if not text:
-                        continue
+    def ingest_to_neo4j(self, batch_size=100, limit=None):
+        """Load chunks from SQLite to Neo4j with embeddings - RESUMABLE"""
+    
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"\n📊 Starting Neo4j ingestion using device: {device.upper()}")
+        self.neo4_setup()
+        conn = sqlite3.connect("databases/merged.db")
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ingestion_progress (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                last_chunk_rowid INTEGER DEFAULT 0)""")
+        cursor.execute("INSERT OR IGNORE INTO ingestion_progress (id, last_chunk_rowid) VALUES (1, 0)")
+        conn.commit()
+        cursor.execute("SELECT last_chunk_rowid FROM ingestion_progress WHERE id = 1")
+        start_rowid = cursor.fetchone()[0]
+        if start_rowid > 0:
+            print(f"🔄 RESUMING from chunk rowid: {start_rowid:,}")
+        else:
+            print("🆕 Starting fresh ingestion")    
+        query = "SELECT COUNT(*) FROM document_chunks WHERE rowid > ?"
+        cursor.execute(query, (start_rowid,))
+        total = cursor.fetchone()[0]
+        print(f"Total chunks to process: {total:,}")
+        if total == 0:
+            print("✅ Nothing to process - already complete!")
+            conn.close()
+            return
+        processed = 0
+        last_rowid = start_rowid
+        try:
+            with tqdm(total=total, desc="Ingesting chunks") as pbar:
+                while True:
+                    # ✅ Fetch embedding column from database
+                    query = """
+                        SELECT dc.rowid, dc.id, dc.chunk_id, dc.chunk_text, d.url, dc.embedding
+                        FROM document_chunks dc
+                        LEFT JOIN documents d ON dc.id = d.id
+                        WHERE dc.rowid > ?
+                        ORDER BY dc.rowid
+                        LIMIT ?
+                    """
+                    cursor.execute(query, (last_rowid, batch_size))
+                    batch_rows = cursor.fetchall()
+                    if not batch_rows:
+                        break
                     
-                    # Use existing embedding or newly generated one
-                    if existing_embedding is not None:
-                        # Convert BLOB to list
-                        import numpy as np
-                        embedding = np.frombuffer(existing_embedding, dtype=np.float32).tolist()
-                    else:
-                        embedding = new_embeddings[i].tolist()
-                    if not text:
-                        continue
-                    neo4j_batch.append({
-                        'chunk_rowid': chunk_rowid,
-                        'doc_id': doc_id,
-                        'chunk_id': chunk_id,
-                        'text': text,
-                        'url': url or '',
-                        'embedding': embedding.tolist()
-                    })
-                if neo4j_batch:
-                    self._write_neo4j_batch(neo4j_batch)
-                    processed += len(neo4j_batch)
-                last_rowid = batch_rows[-1][0]
-                cursor.execute("UPDATE ingestion_progress SET last_chunk_rowid = ? WHERE id = 1", (last_rowid,))
-                conn.commit()
-                pbar.update(len(batch_rows))
-        print(f"\n✅ Ingested {processed:,} chunks to Neo4j")
-        print(f"💾 Checkpoint saved at rowid: {last_rowid:,}")
-    except Exception as e:
-        print(f"\n⚠️ Error occurred: {e}")
-        print(f"💾 Progress saved. Can resume from rowid: {last_rowid:,}")
-        raise
-    finally:
-        conn.close()
+                    # ✅ Separate rows with/without embeddings
+                    texts_to_encode = []
+                    indices_to_encode = []
+                    
+                    for i, row in enumerate(batch_rows):
+                        chunk_rowid, doc_id, chunk_id, text, url, existing_embedding = row
+                        if not text:
+                            continue
+                        # Check if embedding exists
+                        if existing_embedding is None:
+                            texts_to_encode.append(text)
+                            indices_to_encode.append(i)
+                    
+                    # ✅ Only generate embeddings if needed
+                    new_embeddings = {}
+                    if texts_to_encode:
+                        print(f"  Generating {len(texts_to_encode)} missing embeddings...")
+                        embeddings = self.embedding_model.encode(texts_to_encode, batch_size=48, show_progress_bar=False)
+                        new_embeddings = dict(zip(indices_to_encode, embeddings))
+                    
+                    # ✅ Build Neo4j batch (use existing or new embeddings)
+                    neo4j_batch = []
+                    for i, row in enumerate(batch_rows):
+                        chunk_rowid, doc_id, chunk_id, text, url, existing_embedding = row
+                        if not text:
+                            continue
+                        
+                        # Use existing embedding or newly generated one
+                        if existing_embedding is not None:
+                            # Convert BLOB to list
+                            embedding = np.frombuffer(existing_embedding, dtype=np.float32).tolist()
+                        else:
+                            embedding = new_embeddings[i]
+                        if not text:
+                            continue
+                        neo4j_batch.append({
+                            'chunk_rowid': chunk_rowid,
+                            'doc_id': doc_id,
+                            'chunk_id': chunk_id,
+                            'text': text,
+                            'url': url or '',
+                            'embedding': embedding
+                        })
+                    if neo4j_batch:
+                        self._write_neo4j_batch(neo4j_batch)
+                        processed += len(neo4j_batch)
+                    last_rowid = batch_rows[-1][0]
+                    cursor.execute("UPDATE ingestion_progress SET last_chunk_rowid = ? WHERE id = 1", (last_rowid,))
+                    conn.commit()
+                    pbar.update(len(batch_rows))
+            print(f"\n✅ Ingested {processed:,} chunks to Neo4j")
+            print(f"💾 Checkpoint saved at rowid: {last_rowid:,}")
+        except Exception as e:
+            print(f"\n⚠️ Error occurred: {e}")
+            print(f"💾 Progress saved. Can resume from rowid: {last_rowid:,}")
+            raise
+        finally:
+            conn.close()
     def _write_neo4j_batch(self, batch):
         """Write batch of chunks to Neo4j"""
         with self.neo4j_driver.session() as session:
@@ -306,7 +308,6 @@ def ingest_to_neo4j(self, batch_size=100, limit=None):
 
     def build_graph_relationships(self, min_similarity=0.85):
         """Build relationships between chunks based on semantic similarity"""
-        from tqdm import tqdm
         print(f"\n🏗️ Building graph relationships (min_similarity={min_similarity})...")
         
         # Get all chunks with embeddings
@@ -315,7 +316,8 @@ def ingest_to_neo4j(self, batch_size=100, limit=None):
             WHERE c.embedding IS NOT NULL
             RETURN c.id AS chunk_id, c.embedding AS embedding
         """
-        result = self.neo4j_driver.execute_query(query)
+        with self.neo4j_driver.session() as session:
+            result = session.run(query)
         
         chunks = []
         for record in result:
@@ -351,7 +353,6 @@ def ingest_to_neo4j(self, batch_size=100, limit=None):
         
         print(f"   Found {len(similarities)} similar pairs")
         
-        # Create relationships in Neo4j
         print("   Creating relationships in Neo4j...")
         with self.neo4j_driver.session() as session:
             for sim in tqdm(similarities, desc="Creating relationships"):
@@ -363,10 +364,8 @@ def ingest_to_neo4j(self, batch_size=100, limit=None):
                 """, chunk1_id=sim['chunk1_id'], chunk2_id=sim['chunk2_id'], similarity=sim['similarity'])
         
         print(f"✅ Built {len(similarities)} relationships")
-
     def _cosine_similarity(self, vec1, vec2):
         """Calculate cosine similarity between two vectors"""
-        import numpy as np
         dot_product = np.dot(vec1, vec2)
         norm_vec1 = np.linalg.norm(vec1)
         norm_vec2 = np.linalg.norm(vec2)
@@ -376,16 +375,12 @@ def ingest_to_neo4j(self, batch_size=100, limit=None):
         
         return float(dot_product / (norm_vec1 * norm_vec2))
     def create_similarity_edges(self, k=5, threshold=0.7):
-        """Create SIMILAR_TO edges between semantically similar chunks"""
         print(f"\n🔗 Creating similarity edges (k={k}, threshold={threshold})...")
-            
         with self.neo4j_driver.session() as session:
                 # Get total chunk count
                 result = session.run("MATCH (c:Chunk) RETURN count(c) AS count")
                 total = result.single()['count']
-                print(f"Processing {total:,} chunks...")
-                
-                # Create similarity edges using vector index
+                print(f"Processing {total:,} chunks...")                
                 session.run("""
                     MATCH (c1:Chunk)
                     CALL db.index.vector.queryNodes('chunk_embeddings', $k + 1, c1.embedding)
@@ -399,13 +394,9 @@ def ingest_to_neo4j(self, batch_size=100, limit=None):
                 edge_count = result.single()['count']
                 print(f"✅ Created {edge_count:,} similarity edges")
 
-    def vector_search(self, query_text, k=10):
+    def fast_search(self, query_text, k=5):
         """Vector-only semantic search in Neo4j using stored embeddings"""
-        from sentence_transformers import SentenceTransformer
-
-        # Step 1: Embed the query
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        query_embedding = model.encode(query_text).tolist()
+        query_embedding = self.embedding_model.encode(query_text).tolist()
 
             # Step 2: Run vector similarity query in Neo4j
         with self.neo4j_driver.session() as session:
@@ -429,67 +420,64 @@ def ingest_to_neo4j(self, batch_size=100, limit=None):
             for record in result
         ]
     
-    def hybrid_search(self, query_text, k_vector=5, expand_depth=1, decay_factor=0.85):
+    def default_search(self, query_text: str = ..., k_vector=5, expand_depth=1, decay_factor=0.85):
         """Hybrid search: vector seeds + graph expansion with decayed scoring"""
-        from sentence_transformers import SentenceTransformer
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        query_embedding = model.encode(query_text).tolist()
-    with self.neo4j_driver.session() as session:
-        result = session.run(f"""
-            // Step 1: Vector search
-            CALL db.index.vector.queryNodes('chunk_embeddings', $k, $query_embedding)
-            YIELD node AS seed, score
+        query_embedding = self.embedding_model.encode(query_text).tolist()
+        with self.neo4j_driver.session() as session:
+            result = session.run(f"""
+                // Step 1: Vector search
+                CALL db.index.vector.queryNodes('chunk_embeddings', $k, $query_embedding)
+                YIELD node AS seed, score
 
-            // Step 2: Expand through SIMILAR_TO graph edges
-            OPTIONAL MATCH path = (seed)-[:SIMILAR_TO*1..{expand_depth}]-(related:Chunk)
+                // Step 2: Expand through SIMILAR_TO graph edges
+                OPTIONAL MATCH path = (seed)-[:SIMILAR_TO*1..{expand_depth}]-(related:Chunk)
+                WITH 
+                    seed, 
+                    score AS seed_score,
+                    related,
+                    CASE 
+                        WHEN related IS NULL THEN 0 
+                        ELSE length(path) 
+                    END AS hop_distance
 
-            WITH 
-                seed, 
-                score AS seed_score,
-                related,
-                CASE 
-                    WHEN related IS NULL THEN 0 
-                    ELSE length(path) 
-                END AS hop_distance
+                WITH DISTINCT 
+                    COALESCE(related, seed) AS chunk,
+                    MIN(hop_distance) AS hop_distance,
+                    MAX(seed_score) AS seed_score  // max score if multiple paths reach same chunk
 
-            WITH DISTINCT 
-                COALESCE(related, seed) AS chunk,
-                MIN(hop_distance) AS hop_distance,
-                MAX(seed_score) AS seed_score  // max score if multiple paths reach same chunk
+                RETURN 
+                    chunk.text AS text,
+                    chunk.url AS url,
+                    chunk.id AS id,
+                    seed_score,
+                    hop_distance
+                LIMIT 50
+            """, k=k_vector, query_embedding=query_embedding)
 
-            RETURN 
-                chunk.text AS text,
-                chunk.url AS url,
-                chunk.id AS id,
-                seed_score,
-                hop_distance
-            LIMIT 50
-        """, k=k_vector, query_embedding=query_embedding)
+            results = []
+            seen_ids = set()
 
-        results = []
-        seen_ids = set()
+            for record in result:
+                chunk_id = record['id']
+                if chunk_id in seen_ids:
+                    continue
 
-        for record in result:
-            chunk_id = record['id']
-            if chunk_id in seen_ids:
-                continue
+                hop_distance = record['hop_distance'] or 0
+                seed_score = record['seed_score'] or 0.0
+                # Apply decay: deeper nodes get lower scores
+                score = seed_score * (decay_factor ** hop_distance)
 
-            hop_distance = record['hop_distance'] or 0
-            seed_score = record['seed_score'] or 0.0
-            # Apply decay: deeper nodes get lower scores
-            score = seed_score * (decay_factor ** hop_distance)
+                results.append({
+                    'text': record['text'],
+                    'url': record['url'],
+                    'id': chunk_id,
+                    'score': round(score, 4)
+                })
+                seen_ids.add(chunk_id)
 
-            results.append({
-                'text': record['text'],
-                'url': record['url'],
-                'id': chunk_id,
-                'score': round(score, 4)
-            })
-            seen_ids.add(chunk_id)
-
-        # Optional: sort after applying decay
-        results.sort(key=lambda x: x['score'], reverse=True)
-        return results
+            # Optional: sort after applying decay
+            results.sort(key=lambda x: x['score'], reverse=True)
+            return results
     def close_neo4j(self):
         """Close Neo4j connection"""
         if hasattr(self, 'neo4j_driver'):
@@ -509,15 +497,12 @@ def ingest_to_neo4j(self, batch_size=100, limit=None):
             # Count chunks
             chunk_result = session.run("MATCH (c:Chunk) RETURN count(c) AS count")
             chunk_count = chunk_result.single()['count']
-            
             # Count documents
             doc_result = session.run("MATCH (d:Document) RETURN count(d) AS count")
             doc_count = doc_result.single()['count']
-            
             # Count similarity edges
             edge_result = session.run("MATCH ()-[r:SIMILAR_TO]->() RETURN count(r) AS count")
             edge_count = edge_result.single()['count']
-            
             return {
                 'chunks': chunk_count,
                 'documents': doc_count,
@@ -530,12 +515,67 @@ def ingest_to_neo4j(self, batch_size=100, limit=None):
         confirm = input("Type 'yes' to confirm: ")
         if confirm.lower() != 'yes':
             print("❌ Cancelled")
-
-        
+            return # Added return to prevent accidental deletion if cancelled
         with self.neo4j_driver.session() as session:
             session.run("MATCH (n) DETACH DELETE n")
             print("🗑️  All Neo4j data deleted")
+    def ollama_chat(self, query, content):
+        prompt = f"""
+            You are an assistant.
+            Use the context below to answer the question.
+            Context:
+            {content}
+            Question:
+            {query}
+            Answer clearly and concisely.
+            """
+    #           response = requests.post(
+    #     "http://localhost:11434/api/chat",
+    #     json={
+    #         "model": "llama3.2:1b",
+    #         "messages": [
+    #             {"role": "user", "content": prompt}
+    #         ],
+    #         "stream": False
+    #     }
+    # )
 
+    # response.raise_for_status()
+    #return response.json()["message"]["content"]2
+        response = ollama.chat(
+            model="llama3.2:1b",
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        return response["message"]["content"]
+
+    def main(self):
+        self.neo4_setup()
+        while True:
+            query: str = input("\nEnter your question (type 'exit' to quit): ")
+
+            if query.lower() in ["exit", "bye", "quit"]:
+                self.close_neo4j()
+                self.clear_neo4j_data()
+                print("👋 Goodbye!")
+                break  
+            mode = input("Enter mode (fast, deep_search, default): ")
+            if mode == "fast":
+                content = self.fast_search(query)
+            elif mode == "deep_search":
+                content = self.default_search(
+                    query,
+                    k_vector=3,
+                    expand_depth=2,
+                    decay_factor=0.6)
+            else:
+                content = self.default_search(query)
+            response = self.ollama_chat(query, content)
+            print("\n🧠 Answer:\n", response)
+
+        
 if __name__ == "__main__":
-    BuildingRag().ingest_to_neo4j()
- # AIzaSyCKwZVmRqIlnzFvDyJx0YBfzEyG7WKNjp4
+    BuildingRag().main()
+
+

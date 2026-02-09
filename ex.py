@@ -429,7 +429,7 @@ class BuildingRag:
             """)
             logger.info("✅ Created vector index for embeddings")
     
-    def ingest_to_neo4j(self, batch_size=500, limit=None, embedding_batch_size=32):
+    def ingest_to_neo4j(self, batch_size=500, limit=None, embedding_batch_size=48):
         """Load chunks from SQLite to Neo4j with embeddings - RESUMABLE with checkpoint
         
         OPTIMIZED: Batches embedding generation for 10-20x speedup
@@ -950,9 +950,7 @@ class BuildingRag:
                         for query, m in stats['cached_keys']:
                             print(f"    - '{query[:50]}...' [{m}]")
                     print()
-                   
                     continue
-                
                 elif user_input.lower() == "clear":
                     self.query_cache.clear()
                     continue
@@ -974,7 +972,7 @@ class BuildingRag:
                     print("❌ No results found.\n")
                     continue
                 
-                # Display ONLY retrieved chunks (no LLM processing)
+                # Display ONLY retrieved chunks (no LLM processing
                 print(f"\n📚 Retrieved Chunks ({len(results)} found)")
                 print("=" * 70 + "\n")
                 
@@ -1076,7 +1074,7 @@ class BuildingRag:
             current_count = result.single()['count']
         logger.info(f"   Current chunks in Neo4j: {current_count:,}")
         
-        self.ingest_to_neo4j(batch_size=100, limit=1000)
+        self.ingest_to_neo4j(batch_size=500, limit=1000)
         
         with self.neo4j_driver.session() as session:
             result = session.run("MATCH (c:Chunk) RETURN count(c) AS count")

@@ -1,4 +1,4 @@
-# Enhanced Chat Interface - Usage Example
+ Enhanced Chat Interface - Usage Example
 
 ## 🎯 What's New
 
