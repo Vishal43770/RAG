@@ -13,6 +13,7 @@ from sentence_transformers import SentenceTransformer
 from neo4j import GraphDatabase
 from tqdm import tqdm
 from dotenv import load_dotenv
+import time
 
 # IST Logger Setup
 class ISTFormatter(logging.Formatter):
@@ -313,7 +314,8 @@ class BuildingRag:
             auth=(
                 os.getenv("NEO4J_USERNAME", "neo4j"),
                 os.getenv("NEO4J_PASSWORD", "ragpassword")
-            )
+            ),
+            notifications_min_severity="OFF"  # Suppress SIMILAR_TO warnings
         )
         logger.info("🔗 Connected to Neo4j")
         # Create constraints and indexes
@@ -931,31 +933,34 @@ class BuildingRag:
 
 
     def ollama_chat(self, query, context_results):
-
-        import Ollama        
         context_text = "\n\n".join([f"Source: {r.get('url', 'N/A')}\nContent: {r['text']}" for r in context_results])
         
         prompt = f"""
-        You are a helpful AI assistant. Use the following retrieved context to answer the user's question.
-        If the answer is not in the context, say that you don't know, but don't make up information.
-        
-        CONTEXT:
-        {context_text}
-        
-        USER QUESTION:
-        {query}
-        
-        ANSWER:
-        """
+                You are an AI assistant answering strictly from the provided context.
+
+                Instructions:
+                1. Answer ONLY using the information from the CONTEXT.
+                2. Do NOT add external knowledge.
+                3. The FIRST sentence of your answer must directly address the USER QUESTION using the most relevant chunk. 
+                4. The remaining part of the answer should combine with the  relevant information from all useful chunks. 
+                5. Keep the answer clear, factual, and structured. 
+                CONTEXT:
+                {context_text}
+                USER QUESTION:  
+                {query}
+                ANSWER:
+                """
+
         try:
             response = ollama.chat(
-                model="codellama:7b",
+                model="llama3.2:1b",
                 messages=[{"role": "user", "content": prompt}]
             )
             return response["message"]["content"]
         except Exception as e:
             logger.error(f"❌ Ollama Error: {e}")
             return f"Error generating response: {e}"
+
 
     def close_neo4j(self):
         """Close Neo4j connection"""
@@ -1210,26 +1215,61 @@ class BuildingRag:
                     # self.clear_neo4j_data() # Warning: This deletes everything!
                     print("👋 Goodbye!")
                     break  
+                print("PRESS ENTER FOR DEFAULT")
+                mode = input("Enter mode (1) fast, (2) deep_search : ").strip().lower()
+                time_started = time.time()
                 
-                mode = input("Enter mode (fast, deep_search, default): ").strip().lower()
-                
-                if mode == "fast":
-                    content = self.fast_search(query)
-                elif mode == "deep_search":
+                if mode == "1":
+                    content = self.fast_search(query, k=10)
+                elif mode == "2":
                     content = self.default_search(
                         query,
-                        k_vector=3,
+                        k_vector=15,
                         expand_depth=2,
                         decay_factor=0.6)
                 else:
-                    content = self.default_search(query)
-                
+                    content = self.default_search(query, k_vector=10)
+
                 if not content:
                     print("❌ No relevant information found.")
                     continue
-                    
-                response = self.ollama_chat(query, content)
+
+                # Top 5 chunks go to Ollama (fast, focused prompt)
+                # Full list used for chunk display and URL sources
+                response = self.ollama_chat(query, content[:5])
+
+
+                # Show retrieved chunks
+                print(f"\n📦 Retrieved Chunks ({len(content)} found):")
+                print("=" * 70)
+                for i, r in enumerate(content, 1):
+                    print(f"\n🔹 Chunk #{i}")
+                    print(f"   🔗 URL   : {r.get('url', 'N/A')}")
+                    print(f"   📊 Score : {r.get('score', 0):.4f}")
+                    text = r.get('text', '').strip()
+                    # Print first 300 chars of text to keep it readable
+                    print(f" 📄 Text  : {text}")
+                print("=" * 70)
+
                 print("\n🧠 AI Answer:\n", response)
+                time_taken = time.time() - time_started
+                print(f"\nTime taken: {time_taken:.2f} seconds")
+
+                # Show source URLs (Only for chunks passed to Ollama)
+                print("\n📚 Sources (Used by AI):")
+                seen_urls = set()
+                count = 0
+                for i, r in enumerate(content[:5], 1):
+                    url = r.get('url', 'N/A')
+                    if url and url not in seen_urls:
+                        score = r.get('score', 0)
+                        print(f"   [{count+1}] {url}  (score: {score:.4f})")
+                        seen_urls.add(url)
+                        count += 1
+                print()
+
+
+
                 
             except KeyboardInterrupt:
                 print("\n👋 Goodbye!")
