@@ -585,7 +585,6 @@ class BuildingRag:
         if mode == "basic":
             # Vector-only search, top 3 results
             results = self.vector_search(query, k=3)
-        
         elif mode == "fast":
             # Fast vector search, top 3 results
             results = self.vector_search(query, k=3)
@@ -1053,16 +1052,16 @@ class BuildingRag:
         
         # 1. Select Mode at start of chat session
         print("\n🎯 Select Search Mode:")
-        print("  1. basic - Fast vector search")
+        print("  1. fast  - Fast vector search")
         print("  2. deep  - Hybrid search with graph (recommended)")
         
         mode_choice = input("\nEnter choice (1/2) [default: 2]: ").strip() or "2"
-        current_mode = "deep" if mode_choice == "2" else "basic"
+        current_mode = "deep" if mode_choice == "2" else "fast"
         
         print(f"\n✅ Mode set to: {current_mode.upper()}")
         print("\n⌨️  Commands:")
         print("  • Type your question to get an AI answer")
-        print("  • 'mode <basic|deep>' to change mode mid-chat")
+        print("  • 'mode <fast|deep>' to change mode mid-chat")
         print("  • 'exit' or 'quit' to end")
         print("="*70)
         
@@ -1072,7 +1071,7 @@ class BuildingRag:
                 
                 if not user_input:
                     continue
-                if user_input.lower() in {"exit", "quit"}:
+                if user_input.lower() in {"exit", "quit", "bye"}:
                     print("\n👋 Goodbye!")
                     break
                 
@@ -1080,15 +1079,15 @@ class BuildingRag:
                     parts = user_input.split()
                     if len(parts) > 1:
                         new_mode = parts[1].lower()
-                        if new_mode in ["basic", "fast", "deep"]:
-                            current_mode = "deep" if new_mode == "deep" else "basic"
+                        if new_mode in ["fast", "deep"]:
+                            current_mode = new_mode
                             print(f"✅ Mode changed to: {current_mode.upper()}")
                         else:
-                            print("❌ Invalid mode. Use: basic or deep")
+                            print("❌ Invalid mode. Use: fast or deep")
                     continue
 
                 # 2. Retrieve (includes query embedding generation)
-                print(f"🔍 Searching and thinking...")
+                print(f"🔍 Searching ({current_mode})...")
                 results = self.handle_query(user_input, mode=current_mode)
                 
                 if not results:
@@ -1111,6 +1110,132 @@ class BuildingRag:
                 break
             except Exception as e:
                 logger.error(f"❌ Error in chat: {e}")
+
+    def fast_search(self, query_text, k=5):
+        """Vector-only semantic search in Neo4j using stored embeddings"""
+        query_embedding = self.model.encode(query_text).tolist()
+
+        with self.neo4j_driver.session() as session:
+            result = session.run("""
+            CALL db.index.vector.queryNodes('chunk_embeddings', $k, $query_embedding)
+            YIELD node, score
+            RETURN 
+                node.chunk_id AS chunk_id,
+                node.text AS text,
+                node.url AS url,
+                score
+            ORDER BY score DESC
+        """, k=k, query_embedding=query_embedding)
+            
+            return [
+                {
+                    'chunk_id': record['chunk_id'],
+                    'text': record['text'],
+                    'url': record['url'],
+                    'score': float(record['score'])
+                }
+                for record in result
+            ]
+
+    def default_search(self, query_text, k_vector=5, expand_depth=1, decay_factor=0.85):
+        """Hybrid search: vector seeds + graph expansion with decayed scoring"""
+        query_embedding = self.model.encode(query_text).tolist()
+        
+        with self.neo4j_driver.session() as session:
+            result = session.run(f"""
+                // Step 1: Vector search
+                CALL db.index.vector.queryNodes('chunk_embeddings', $k, $query_embedding)
+                YIELD node AS seed, score
+
+                // Step 2: Expand through SIMILAR_TO graph edges
+                OPTIONAL MATCH path = (seed)-[:SIMILAR_TO*1..{expand_depth}]-(related:Chunk)
+                WITH 
+                    seed, 
+                    score AS seed_score,
+                    related,
+                    CASE 
+                        WHEN related IS NULL THEN 0 
+                        ELSE length(path) 
+                    END AS hop_distance
+
+                WITH DISTINCT 
+                    COALESCE(related, seed) AS chunk,
+                    MIN(hop_distance) AS hop_distance,
+                    MAX(seed_score) AS seed_score  // max score if multiple paths reach same chunk
+
+                RETURN 
+                    chunk.text AS text,
+                    chunk.url AS url,
+                    chunk.id AS id,
+                    seed_score,
+                    hop_distance
+                LIMIT 50
+            """, k=k_vector, query_embedding=query_embedding)
+
+            results = []
+            seen_ids = set()
+
+            for record in result:
+                chunk_id = record['id']
+                if chunk_id in seen_ids:
+                    continue
+
+                hop_distance = record['hop_distance'] or 0
+                seed_score = record['seed_score'] or 0.0
+                # Apply decay: deeper nodes get lower scores
+                score = seed_score * (decay_factor ** hop_distance)
+
+                results.append({
+                    'text': record['text'],
+                    'url': record['url'],
+                    'id': chunk_id,
+                    'score': round(score, 4)
+                })
+                seen_ids.add(chunk_id)
+
+            results.sort(key=lambda x: x['score'], reverse=True)
+            return results
+
+    def run_interactive_custom(self):
+        """User-requested direct interactive loop"""
+        self.setup_neo4j_graph()
+        while True:
+            try:
+                query: str = input("\nEnter your question (type 'exit' to quit): ").strip()
+
+                if not query:
+                    continue
+                if query.lower() in ["exit", "bye", "quit"]:
+                    self.close_neo4j()
+                    # self.clear_neo4j_data() # Warning: This deletes everything!
+                    print("👋 Goodbye!")
+                    break  
+                
+                mode = input("Enter mode (fast, deep_search, default): ").strip().lower()
+                
+                if mode == "fast":
+                    content = self.fast_search(query)
+                elif mode == "deep_search":
+                    content = self.default_search(
+                        query,
+                        k_vector=3,
+                        expand_depth=2,
+                        decay_factor=0.6)
+                else:
+                    content = self.default_search(query)
+                
+                if not content:
+                    print("❌ No relevant information found.")
+                    continue
+                    
+                response = self.ollama_chat(query, content)
+                print("\n🧠 AI Answer:\n", response)
+                
+            except KeyboardInterrupt:
+                print("\n👋 Goodbye!")
+                break
+            except Exception as e:
+                logger.error(f"❌ Error in session: {e}")
 
 def main():
     """Main entry point for command line usage or interactive session"""
@@ -1152,9 +1277,7 @@ def main():
     if command == 'rebuild':
         rag.run_full_pipeline(setup_all=True)
     elif command == 'chat':
-        rag.setup_neo4j_graph()
-        rag.chat_with_rag()
-        rag.close_neo4j()
+        rag.run_interactive_custom()
     elif command == 'stats':
         rag.setup_neo4j_graph()
         stats = rag.get_neo4j_stats()
