@@ -1050,17 +1050,21 @@ class BuildingRag:
         print("\n" + "="*70)
         print("🤖 RAG CHAT INTERFACE (with Ollama)")
         print("="*70)
-        print("\n📋 Available Modes:")
-        print("  • basic - Fast vector search")
-        print("  • deep  - Hybrid search with graph (recommended)")
+        
+        # 1. Select Mode at start of chat session
+        print("\n🎯 Select Search Mode:")
+        print("  1. basic - Fast vector search")
+        print("  2. deep  - Hybrid search with graph (recommended)")
+        
+        mode_choice = input("\nEnter choice (1/2) [default: 2]: ").strip() or "2"
+        current_mode = "deep" if mode_choice == "2" else "basic"
+        
+        print(f"\n✅ Mode set to: {current_mode.upper()}")
         print("\n⌨️  Commands:")
         print("  • Type your question to get an AI answer")
-        print("  • 'mode <basic|deep>' to change search mode")
+        print("  • 'mode <basic|deep>' to change mode mid-chat")
         print("  • 'exit' or 'quit' to end")
         print("="*70)
-        
-        current_mode = "deep"
-        print(f"\n✅ Initial Mode: {current_mode.upper()}")
         
         while True:
             try:
@@ -1083,7 +1087,7 @@ class BuildingRag:
                             print("❌ Invalid mode. Use: basic or deep")
                     continue
 
-                # 1. Retrieve
+                # 2. Retrieve (includes query embedding generation)
                 print(f"🔍 Searching and thinking...")
                 results = self.handle_query(user_input, mode=current_mode)
                 
@@ -1091,11 +1095,11 @@ class BuildingRag:
                     print("❌ No relevant information found.")
                     continue
                 
-                # 2. Generate
+                # 3. Generate
                 answer = self.ollama_chat(user_input, results)
                 print(f"\n🧠 AI Answer:\n{answer}")
                 
-                # 3. Show Sources (Optional)
+                # 4. Show Sources
                 print("\n📚 Sources:")
                 for i, r in enumerate(results[:3], 1):
                     url = r.get('url', 'N/A')
@@ -1109,19 +1113,42 @@ class BuildingRag:
                 logger.error(f"❌ Error in chat: {e}")
 
 def main():
-    """Main entry point for command line usage"""
+    """Main entry point for command line usage or interactive session"""
     import sys
     from dotenv import load_dotenv
     load_dotenv()
     
     rag = BuildingRag()
     
-    if len(sys.argv) < 2:
-        print("Usage: python3 ex.py [rebuild|chat|stats|clear]")
-        return
+    # Handle command line arguments if provided
+    if len(sys.argv) > 1:
+        command = sys.argv[1].lower()
+    else:
+        # 1. Interactive Prompt: Chat or Rebuild?
+        print("\n" + "="*70)
+        print("🚀 RAG SYSTEM STARTUP")
+        print("="*70)
+        print("\nWhat would you like to do?")
+        print("  1. Chat (Start interactive AI session)")
+        print("  2. Rebuild (Run full ingestion pipeline)")
+        print("  3. Stats (Show database statistics)")
+        print("  4. Clear (Delete Neo4j data)")
+        
+        choice = input("\nEnter choice (1/2/3/4): ").strip()
+        
+        if choice == "1":
+            command = "chat"
+        elif choice == "2":
+            command = "rebuild"
+        elif choice == "3":
+            command = "stats"
+        elif choice == "4":
+            command = "clear"
+        else:
+            print("❌ Invalid choice. Exiting.")
+            return
 
-    command = sys.argv[1].lower()
-    
+    # Execute Command
     if command == 'rebuild':
         rag.run_full_pipeline(setup_all=True)
     elif command == 'chat':
