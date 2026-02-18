@@ -804,9 +804,10 @@ class BuildingRag:
                 if not user_input:
                     continue
                 
-                # Handle commands
                 if user_input.lower() in {"exit", "quit"}:
                     print("\n👋 Goodbye!")
+                    self.query_cache.clear()
+                    self.close_neo4j()
                     break
                 
                 elif user_input.lower() == "stats":
@@ -936,21 +937,20 @@ class BuildingRag:
         context_text = "\n\n".join([f"Source: {r.get('url', 'N/A')}\nContent: {r['text']}" for r in context_results])
         
         prompt = f"""
-                You are an AI assistant answering strictly from the provided context.
+            You are a retrieval-grounded AI assistant.
+            You must strictly follow these rules:
+            1. Answer ONLY using the information provided in the CONTEXT.
+            2. Do NOT use external knowledge.
+            3. The FIRST sentence of your response must directly answer the USER QUESTION using the most relevant information from the context.
+            4. After the first sentence, combine and synthesize relevant information from all useful context segments.
+            5. Keep the response clear, factual, and well-structured.
+            6. The response must feel natural, human-like, and conversational — not robotic and not like a typical chatbot template reply.
+            CONTEXT:
+            {context_text}
 
-                Instructions:
-                1. Answer ONLY using the information from the CONTEXT.
-                2. Do NOT add external knowledge.
-                3. The FIRST sentence of your answer must directly address the USER QUESTION using the most relevant chunk. 
-                4. The remaining part of the answer should combine with the  relevant information from all useful chunks. 
-                5. Keep the answer clear, factual, and structured. 
-                CONTEXT:
-                {context_text}
-                USER QUESTION:  
-                {query}
-                ANSWER:
-                """
-
+            USER QUESTION:
+            {query}
+            """
         try:
             response = ollama.chat(
                 model="llama3.2:1b",
@@ -1211,8 +1211,8 @@ class BuildingRag:
                 if not query:
                     continue
                 if query.lower() in ["exit", "bye", "quit"]:
+                    self.query_cache.clear()
                     self.close_neo4j()
-                    # self.clear_neo4j_data() # Warning: This deletes everything!
                     print("👋 Goodbye!")
                     break  
                 print("PRESS ENTER FOR DEFAULT")
@@ -1220,7 +1220,7 @@ class BuildingRag:
                 time_started = time.time()
                 
                 if mode == "1":
-                    content = self.fast_search(query, k=10)
+                    content = self.fast_search(query, k=5)
                 elif mode == "2":
                     content = self.default_search(
                         query,
@@ -1267,10 +1267,6 @@ class BuildingRag:
                         seen_urls.add(url)
                         count += 1
                 print()
-
-
-
-                
             except KeyboardInterrupt:
                 print("\n👋 Goodbye!")
                 break
