@@ -1220,34 +1220,34 @@ class BuildingRag:
                 time_started = time.time()
                 
                 if mode == "1":
-                    content = self.fast_search(query, k=5)
+                    content = self.fast_search(query, k=10)
+                    n_limit = 5
                 elif mode == "2":
                     content = self.default_search(
                         query,
-                        k_vector=15,
+                        k_vector=25,  # Increased to ensure we have enough for 10 unique URLs
                         expand_depth=2,
                         decay_factor=0.6)
+                    n_limit = 10
                 else:
-                    content = self.default_search(query, k_vector=10)
+                    content = self.default_search(query, k_vector=15)
+                    n_limit = 5
 
                 if not content:
                     print("❌ No relevant information found.")
                     continue
 
-                # Top 5 chunks go to Ollama (fast, focused prompt)
-                # Full list used for chunk display and URL sources
-                response = self.ollama_chat(query, content[:5])
-
+                # Pass n_limit chunks to Ollama
+                response = self.ollama_chat(query, content[:n_limit])
 
                 # Show retrieved chunks
                 print(f"\n📦 Retrieved Chunks ({len(content)} found):")
                 print("=" * 70)
-                for i, r in enumerate(content, 1):
+                for i, r in enumerate(content[:n_limit], 1):
                     print(f"\n🔹 Chunk #{i}")
                     print(f"   🔗 URL   : {r.get('url', 'N/A')}")
                     print(f"   📊 Score : {r.get('score', 0):.4f}")
                     text = r.get('text', '').strip()
-                    # Print first 300 chars of text to keep it readable
                     print(f" 📄 Text  : {text}")
                 print("=" * 70)
 
@@ -1255,11 +1255,11 @@ class BuildingRag:
                 time_taken = time.time() - time_started
                 print(f"\nTime taken: {time_taken:.2f} seconds")
 
-                # Show source URLs (Only for chunks passed to Ollama)
-                print("\n📚 Sources (Used by AI):")
+                # Show source URLs (Matched to Ollama context)
+                print(f"\n📚 Sources (Used by AI - Top {n_limit}):")
                 seen_urls = set()
                 count = 0
-                for i, r in enumerate(content[:5], 1):
+                for i, r in enumerate(content[:n_limit], 1):
                     url = r.get('url', 'N/A')
                     if url and url not in seen_urls:
                         score = r.get('score', 0)
@@ -1267,6 +1267,7 @@ class BuildingRag:
                         seen_urls.add(url)
                         count += 1
                 print()
+
             except KeyboardInterrupt:
                 print("\n👋 Goodbye!")
                 break
