@@ -159,4 +159,25 @@
 
 
 
-print(("\n ollama run llama3.2:1b" * 20))
+
+
+from google import genai
+
+client = genai.Client(api_key="AIzaSyBWuyUqED8UjnzEV1NSLKWLLn1269W5w4I")
+response = client.models.generate_content(
+    model='gemini-2.5-flash',
+    prompt="""
+    You are a helpful assistant. try to give the answers in debate way while not going out of the context. try to include examples from the general poin of view
+    """,
+    contents=input("Enter your query: ")
+)
+print(response.text)
+
+""" Creating a sales order involves documenting a customer's purchase request, typically including customer details, itemized goods, pricing, and shipping information. Key steps include selecting the customer, adding products/quantities, specifying delivery dates, and defining payment terms. The process can be done via CRM systems, ERP software (like SAP's VA01), or manual templates, culminating in a unique order number for tracking. 
+Steps to Create a Sales Order (General Process)
+Enter Customer Info: Input customer name, billing address, and contact details.
+Add Itemized Goods: List products or services, including SKU/item number, quantity, and unit price.
+Define Shipping/Delivery: Specify shipping address, shipping methods, and expected delivery date.
+Set Financial Details: Include taxes, discounts, and payment terms (e.g., net 30).
+Review and Save: Check for accuracy, obtain signatures if necessary, and save to generate a unique sales order number. 
+

@@ -385,10 +385,10 @@ class BuildingRag:
                     MATCH (c1:Chunk)
                     CALL db.index.vector.queryNodes('chunk_embeddings', $k + 1, c1.embedding)
                     YIELD node AS c2, score
-                    WHERE c1 <> c2 AND score >= $threshold
+                    WHERE c1 < > c2 AND score >= $threshold
                     MERGE (c1)-[r:SIMILAR_TO]-(c2)
-                    SET r.score = score
-                """, k=k, threshold=threshold)
+                    SET r.score = score """,
+                 k=k, threshold=threshold)
                 # Count created edges
                 result = session.run("MATCH ()-[r:SIMILAR_TO]->() RETURN count(r) AS count")
                 edge_count = result.single()['count']
@@ -479,20 +479,17 @@ class BuildingRag:
             results.sort(key=lambda x: x['score'], reverse=True)
             return results
     def close_neo4j(self):
-        """Close Neo4j connection"""
         if hasattr(self, 'neo4j_driver'):
             self.neo4j_driver.close()
             print("🔒 Neo4j connection closed")
     
     def check_neo4j_data_exists(self):
-        """Check if Neo4j already has data ingested"""
         with self.neo4j_driver.session() as session:
             result = session.run("MATCH (c:Chunk) RETURN count(c) AS count")
             count = result.single()['count']
             return count > 0
     
     def get_neo4j_stats(self):
-        """Get current Neo4j database statistics"""
         with self.neo4j_driver.session() as session:
             # Count chunks
             chunk_result = session.run("MATCH (c:Chunk) RETURN count(c) AS count")
@@ -510,7 +507,6 @@ class BuildingRag:
             }
     
     def clear_neo4j_data(self):
-        """Clear all data from Neo4j (use with caution!)"""
         print("⚠️  WARNING: This will delete ALL data from Neo4j!")
         confirm = input("Type 'yes' to confirm: ")
         if confirm.lower() != 'yes':

@@ -1,117 +1,18 @@
-# import os
-# import pandas as pd
-# import sqlite3
-
-
-# class BuildingRag:
-#     def __init__(self):
-#         pass
-
-#     def know_data(self):
-#         os.makedirs("databases", exist_ok=True)
-#         dbpath = "databases/VISHALLL.db"
-
-#         conn = sqlite3.connect(dbpath)
-#         cursor = conn.cursor()
-
-#         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-#         print("Tables:", cursor.fetchall())
-
-#         cursor.execute("PRAGMA table_info(documents);")
-#         print("Schema:", cursor.fetchall())
-
-#         df = pd.read_sql_query("SELECT * FROM documents LIMIT 5;", conn)
-#         print(df.head())
-
-#         conn.close()
-
-#     def data_merging(self):
-#         db_files = [
-#             "databases/VISHALLL.db",
-#             "databases/SHIVA.db",
-#             "databases/UDAY.db",
-#             "databases/MASTER.db",
-#         ]
-
-#         def get_schema(db_path, table_name="documents"):
-#             conn = sqlite3.connect(db_path)
-#             cursor = conn.cursor()
-
-#             cursor.execute(f"PRAGMA table_info({table_name});")
-#             schema = cursor.fetchall()
-
-#             conn.close()
-
-#             # return (column_name, column_type)
-#             return {(col[1], col[2]) for col in schema}
-
-#         # Collect schemas
-#         schemas = {}
-#         for db in db_files:
-#             schemas[db] = get_schema(db)
-
-#         # Compare schemas
-#         base_schema = list(schemas.values())[0]
-
-#         for db, schema in schemas.items():
-#             if schema != base_schema:
-#                 print(f"❌ Schema mismatch in {db}")
-#                 print("Difference:", schema.symmetric_difference(base_schema))
-#                 raise Exception("Schemas are NOT compatible")
-
-#         print("✅ All schemas match — safe to merge")
-
-
-# if __name__ == "__main__":
-#     BuildingRag().data_merging()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-import time
 import os
-import pandas as pd
-import sqlite3
-import nltk
+import time
 import logging
-from datetime import datetime
+import sqlite3
+import pandas as pd
+import nltk
+import torch
+import numpy as np
 import pytz
+import ollama
+from datetime import datetime
+from sentence_transformers import SentenceTransformer
+from neo4j import GraphDatabase
+from tqdm import tqdm
+from dotenv import load_dotenv
 
 # IST Logger Setup
 class ISTFormatter(logging.Formatter):
@@ -192,7 +93,13 @@ class BuildingRag:
     def __init__(self):
         nltk.download('punkt')
         self.query_cache = SessionQueryCache()
-        print("✅ Query cache initialized")
+        
+        # Load embedding model once
+        logger.info("🤖 Loading embedding model...")
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
+        logger.info(f"✅ Model loaded on {device.upper()}")
+        print("✅ Query cache and model initialized")
         
 
     def know_data(self):
@@ -450,11 +357,8 @@ class BuildingRag:
         logger.info(f"📊 Already ingested: {ingested_count:,} chunks")
         logger.info(f"🔄 Resuming from chunk ID: {max_ingested_id + 1}")
         
-        # Load embedding model with GPU if available
-        logger.info("🤖 Loading embedding model...")
-        device = 'cuda' if torch.cuda.is_available() else None
-        embedding_model = SentenceTransformer('all-MiniLM-L6-v2', device=device)
-        logger.info(f"✅ Model loaded on {device.upper()}")
+        # Use pre-loaded model
+        embedding_model = self.model
         
         # Connect to SQLite
         conn = sqlite3.connect("databases/merged.db")
@@ -618,13 +522,8 @@ class BuildingRag:
             edge_count = result.single()['count']
             logger.info(f"✅ Created {edge_count:,} similarity edges")
     
-    def vector_search(self, query_text, k=10):
-        """Search using vector similarity"""
-        from sentence_transformers import SentenceTransformer
-        
-        # Generate query embedding
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        query_embedding = model.encode(query_text).tolist()
+        # Use pre-loaded model
+        query_embedding = self.model.encode(query_text).tolist()
         
         with self.neo4j_driver.session() as session:
             result = session.run("""
@@ -645,25 +544,14 @@ class BuildingRag:
             
             return results
     
-    def graph_search(self, query_text, k_seeds=3, depth=2):
-        """Search using graph traversal from seed nodes"""
-        from sentence_transformers import SentenceTransformer
-        
-        # Get seed nodes via vector search
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        query_embedding = model.encode(query_text).tolist()
-        
+        query_embedding = self.model.encode(query_text).tolist()
         with self.neo4j_driver.session() as session:
-            # Find seed chunks
             seed_result = session.run("""
                 CALL db.index.vector.queryNodes('chunk_embeddings', $k, $query_embedding)
                 YIELD node
                 RETURN collect(node.id) AS seed_ids
             """, k=k_seeds, query_embedding=query_embedding)
-            
-            seed_ids = seed_result.single()['seed_ids'] 
-            
-            # Expand via graph - using f-string for depth since Cypher doesn't allow parameterized variable-length paths
+            seed_ids = seed_result.single()['seed_ids']             
             result = session.run(f"""
                 MATCH (seed:Chunk)
                 WHERE seed.id IN $seed_ids
@@ -686,14 +574,7 @@ class BuildingRag:
             return results
     
     def handle_query(self, query, mode="basic"):
-        """
-        Main entry point for queries with caching support
-        Args:
-            query: Search query text
-            mode: Search mode - 'basic', 'fast', 'deep', 'web_search'
-        Returns:
-            List of search results based on the mode
-        """
+
         # 1. Check cache first
         cached = self.query_cache.get(query, mode)
         if cached:
@@ -725,12 +606,7 @@ class BuildingRag:
         
         return results
     
-    def hybrid_search(self, query_text, k_vector=5, expand_depth=1, decay_factor=0.85):
-        """Hybrid search: vector seeds + graph expansion with decayed scoring"""
-        from sentence_transformers import SentenceTransformer
-        
-        model = SentenceTransformer('all-MiniLM-L6-v2')
-        query_embedding = model.encode(query_text).tolist()
+        query_embedding = self.model.encode(query_text).tolist()
         
         with self.neo4j_driver.session() as session:
             result = session.run(f"""
@@ -740,7 +616,6 @@ class BuildingRag:
                 
                 // Step 2: Expand through SIMILAR_TO graph edges
                 OPTIONAL MATCH path = (seed)-[:SIMILAR_TO*1..{expand_depth}]-(related:Chunk)
-                
                 WITH 
                     seed, 
                     score AS seed_score,
@@ -749,7 +624,6 @@ class BuildingRag:
                         WHEN related IS NULL THEN 0 
                         ELSE length(path) 
                     END AS hop_distance
-                
                 // Step 3: Get unique chunks with their minimum hop distance
                 WITH DISTINCT 
                     COALESCE(related, seed) AS chunk,
@@ -845,12 +719,7 @@ class BuildingRag:
             print("🗑️  All Neo4j data deleted")
     
     def run_full_pipeline(self, setup_all=True):
-        """
-        Orchestrate the full RAG pipeline from start to finish
-        
-        Args:
-            setup_all: If True, runs ALL setup steps. If False, only connects to existing Neo4j data
-        """
+
         print("\n" + "="*70)
         print("🚀 RAG SYSTEM FULL PIPELINE")
         print("="*70)
@@ -889,9 +758,7 @@ class BuildingRag:
         print("\n✅ Pipeline complete! Ready for queries.")
         print("="*70 + "\n")
     def chat_with_rag(self):
-        """
-        Interactive chat with RAG - displays only retrieved chunks (no LLM)
-        """
+
         print("\n" + "="*70)
         print("🤖 RAG CHAT INTERFACE")
         print("="*70)
@@ -1013,42 +880,6 @@ class BuildingRag:
             except Exception as e:
                 print(f"\n❌ Error: {e}\n")
     
-    def rebuild_pipeline(self):
-        """Full rebuild pipeline with automatic checkpoints"""
-        logger.info("="*70)
-        logger.info("🔄 RAG DATABASE PIPELINE (WITH AUTOMATIC RESUME)")
-        logger.info("="*70)
-        
-        # Connect to Neo4j
-        logger.info("\n[1/5] 🔗 Setting up Neo4j...")
-        self.setup_neo4j_graph()
-        
-        # Each function checks its own progress and resumes if needed
-        logger.info("\n[2/5] 📊 Merging databases...")
-        self.merge_databases()
-        
-        logger.info("\n[3/5] ✂️  Chunking documents...")
-        self.chunk_documents()
-        
-        logger.info("\n[4/5] 📥 Ingesting to Neo4j...")
-        self.ingest_to_neo4j(batch_size=500)
-        
-        logger.info("\n[5/5] 🕸️  Creating similarity edges...")
-        self.create_similarity_edges(k=5, threshold=0.7)
-        
-        # Show final statistics
-        logger.info("\n" + "="*70)
-        logger.info("📊 FINAL STATISTICS")
-        logger.info("="*70)
-        stats = self.get_neo4j_stats()
-        logger.info(f"  Chunks: {stats['chunks']:,}")
-        logger.info(f"  Documents: {stats['documents']:,}")
-        logger.info(f"  Similarity Edges: {stats['similarity_edges']:,}")
-        logger.info("="*70)
-        
-        logger.info("\n🎉 PIPELINE COMPLETE!")
-        logger.info("You can now run the chatbot with: python3 ex.py chat")
-    
     def test_checkpoints(self):
         """Test checkpoint functionality"""
         logger.info("="*70)
@@ -1100,50 +931,218 @@ class BuildingRag:
         logger.info(f"   Edges: {stats['similarity_edges']:,}")
 
 
+    def ollama_chat(self, query, context_results):
+
+        import Ollama        
+        context_text = "\n\n".join([f"Source: {r.get('url', 'N/A')}\nContent: {r['text']}" for r in context_results])
+        
+        prompt = f"""
+        You are a helpful AI assistant. Use the following retrieved context to answer the user's question.
+        If the answer is not in the context, say that you don't know, but don't make up information.
+        
+        CONTEXT:
+        {context_text}
+        
+        USER QUESTION:
+        {query}
+        
+        ANSWER:
+        """
+        try:
+            response = ollama.chat(
+                model="codellama:7b",
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response["message"]["content"]
+        except Exception as e:
+            logger.error(f"❌ Ollama Error: {e}")
+            return f"Error generating response: {e}"
+
+    def close_neo4j(self):
+        """Close Neo4j connection"""
+        if hasattr(self, 'neo4j_driver'):
+            self.neo4j_driver.close()
+            logger.info("🔒 Neo4j connection closed")
+    
+    def check_neo4j_data_exists(self):
+        """Check if Neo4j already has data ingested"""
+        with self.neo4j_driver.session() as session:
+            result = session.run("MATCH (c:Chunk) RETURN count(c) AS count")
+            count = result.single()['count']
+            return count > 0
+    
+    def get_neo4j_stats(self):
+        """Get current Neo4j database statistics"""
+        with self.neo4j_driver.session() as session:
+            # Count chunks
+            chunk_result = session.run("MATCH (c:Chunk) RETURN count(c) AS count")
+            chunk_count = chunk_result.single()['count']
+            
+            # Count documents
+            doc_result = session.run("MATCH (d:Document) RETURN count(d) AS count")
+            doc_count = doc_result.single()['count']
+            
+            # Count similarity edges
+            edge_result = session.run("MATCH ()-[r:SIMILAR_TO]->() RETURN count(r) AS count")
+            edge_count = edge_result.single()['count']
+            
+            return {
+                'chunks': chunk_count,
+                'documents': doc_count,
+                'similarity_edges': edge_count
+            }
+    
+    def clear_neo4j_data(self):
+        """Clear all data from Neo4j (use with caution!)"""
+        print("⚠️  WARNING: This will delete ALL data from Neo4j!")
+        confirm = input("Type 'yes' to confirm: ")
+        if confirm.lower() != 'yes':
+            print("❌ Cancelled")
+            return
+
+        with self.neo4j_driver.session() as session:
+            session.run("MATCH (n) DETACH DELETE n")
+            print("🗑️  All Neo4j data deleted")
+    
+    def run_full_pipeline(self, setup_all=True):
+        print("\n" + "="*70)
+        print("🚀 RAG SYSTEM FULL PIPELINE")
+        print("="*70)
+        
+        if setup_all:
+            print("\n[1/6] 📊 Checking data...")
+            self.know_data()
+            
+            print("\n[2/6] 🔄 Merging databases...")
+            self.merge_databases()
+            
+            print("\n[3/6] ✂️  Chunking documents...")
+            self.chunk_documents()
+            
+            print("\n[4/6] 🔗 Setting up Neo4j...")
+            self.setup_neo4j_graph()
+            
+            print("\n[5/6] 📥 Ingesting to Neo4j...")
+            self.ingest_to_neo4j(batch_size=500)
+            
+            print("\n[6/6] 🕸️  Creating similarity edges...")
+            self.create_similarity_edges(k=5, threshold=0.7)
+        else:
+            print("\n[1/1] 🔗 Connecting to Neo4j...")
+            self.setup_neo4j_graph()
+        
+        # Show stats
+        print("\n" + "="*70)
+        print("📊 DATABASE STATISTICS")
+        print("="*70)
+        stats = self.get_neo4j_stats()
+        print(f"  Chunks: {stats['chunks']:,}")
+        print(f"  Documents: {stats['documents']:,}")
+        print(f"  Similarity Edges: {stats['similarity_edges']:,}")
+        
+        print("\n✅ Pipeline complete! Ready for queries.")
+        print("="*70 + "\n")
+
+    def chat_with_rag(self):
+        """
+        Interactive chat with RAG - retrieves chunks and generates answers using Ollama
+        """
+        print("\n" + "="*70)
+        print("🤖 RAG CHAT INTERFACE (with Ollama)")
+        print("="*70)
+        print("\n📋 Available Modes:")
+        print("  • basic - Fast vector search")
+        print("  • deep  - Hybrid search with graph (recommended)")
+        print("\n⌨️  Commands:")
+        print("  • Type your question to get an AI answer")
+        print("  • 'mode <basic|deep>' to change search mode")
+        print("  • 'exit' or 'quit' to end")
+        print("="*70)
+        
+        current_mode = "deep"
+        print(f"\n✅ Initial Mode: {current_mode.upper()}")
+        
+        while True:
+            try:
+                user_input = input("\nYou: ").strip()
+                
+                if not user_input:
+                    continue
+                if user_input.lower() in {"exit", "quit"}:
+                    print("\n👋 Goodbye!")
+                    break
+                
+                if user_input.lower().startswith("mode "):
+                    parts = user_input.split()
+                    if len(parts) > 1:
+                        new_mode = parts[1].lower()
+                        if new_mode in ["basic", "fast", "deep"]:
+                            current_mode = "deep" if new_mode == "deep" else "basic"
+                            print(f"✅ Mode changed to: {current_mode.upper()}")
+                        else:
+                            print("❌ Invalid mode. Use: basic or deep")
+                    continue
+
+                # 1. Retrieve
+                print(f"🔍 Searching and thinking...")
+                results = self.handle_query(user_input, mode=current_mode)
+                
+                if not results:
+                    print("❌ No relevant information found.")
+                    continue
+                
+                # 2. Generate
+                answer = self.ollama_chat(user_input, results)
+                print(f"\n🧠 AI Answer:\n{answer}")
+                
+                # 3. Show Sources (Optional)
+                print("\n📚 Sources:")
+                for i, r in enumerate(results[:3], 1):
+                    url = r.get('url', 'N/A')
+                    score = r.get('score', 0)
+                    print(f"   [{i}] {url} (Score: {score:.4f})")
+
+            except KeyboardInterrupt:
+                print("\n\n👋 Goodbye!")
+                break
+            except Exception as e:
+                logger.error(f"❌ Error in chat: {e}")
+
 def main():
-    """Main entry point - automatically runs rebuild pipeline"""
+    """Main entry point for command line usage"""
     import sys
     from dotenv import load_dotenv
     load_dotenv()
     
-    # Check if a specific command was provided
-    if len(sys.argv) > 1:
-        command = sys.argv[1].lower()
-    else:
-        # Default: run rebuild pipeline automatically
-        command = 'rebuild'
-    
     rag = BuildingRag()
     
-    if command == 'rebuild':
-        # Full rebuild pipeline with checkpoints
-        rag.rebuild_pipeline()
-        rag.close_neo4j()
+    if len(sys.argv) < 2:
+        print("Usage: python3 ex.py [rebuild|chat|stats|clear]")
+        return
+
+    command = sys.argv[1].lower()
     
+    if command == 'rebuild':
+        rag.run_full_pipeline(setup_all=True)
     elif command == 'chat':
-        # Connect to Neo4j and start chat
-        logger.info("🔗 Connecting to Neo4j...")
         rag.setup_neo4j_graph()
         rag.chat_with_rag()
         rag.close_neo4j()
-    
     elif command == 'stats':
-        # Show stats only
         rag.setup_neo4j_graph()
         stats = rag.get_neo4j_stats()
-        logger.info("="*70)
-        logger.info("📊 DATABASE STATISTICS")
-        logger.info("="*70)
-        logger.info(f"  Chunks: {stats['chunks']:,}")
-        logger.info(f"  Documents: {stats['documents']:,}")
-        logger.info(f"  Similarity Edges: {stats['similarity_edges']:,}")
-        logger.info("="*70)
+        print("\n📊 DATABASE STATISTICS")
+        print(f"  Chunks: {stats['chunks']:,}")
+        print(f"  Documents: {stats['documents']:,}")
+        print(f"  Similarity Edges: {stats['similarity_edges']:,}")
         rag.close_neo4j()
-    
+    elif command == 'clear':
+        rag.setup_neo4j_graph()
+        rag.clear_neo4j_data()
+        rag.close_neo4j()
     else:
-        logger.error(f"❌ Unknown command: {command}")
-        logger.info("Use: python3 ex.py [rebuild|chat|stats]")
-
+        print(f"❌ Unknown command: {command}")
+        print("Use: rebuild, chat, stats, or clear")
 
 if __name__ == "__main__":
     main()
