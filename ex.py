@@ -936,22 +936,23 @@ class BuildingRag:
     def ollama_chat(self, query, context_results):
         context_text = "\n\n".join([f"Source: {r.get('url', 'N/A')}\nContent: {r['text']}" for r in context_results])
         
-        prompt = f"""
-            You are a retrieval-grounded AI assistant.
-            You must strictly follow these rules:
-            1. Answer ONLY using the information provided in the CONTEXT.
-            2. Do NOT use external knowledge.
-            3. The FIRST sentence of your response must directly answer the USER QUESTION using the most relevant information from the context.
-            4. After the first sentence, combine and synthesize relevant information from all useful context segments.
-            5. Keep the response clear, factual, and well-structured.
-            6. The response must feel natural, human-like, and conversational — not robotic and not like a typical chatbot template reply.
+        try:
+            prompt = f"""
+            You are an expert conversational AI assistant.
+            Rules:
+            1. Begin with one direct sentence answering the user's question.
+            2. Then explain naturally in clear paragraphs. Use bullet points only if requested or necessary.
+            3. Use accurate information only. If unsure, say: "I don't know based on available information."
+            4. Prioritize any context provided by the user.
+            5. Provide ready-to-run code or commands when requested.
+            6. Ask a brief clarifying question only if required to answer correctly.
+            7. Keep the tone clear, direct, and human-like.
+            8. Follow any specific format the user requests exactly.
             CONTEXT:
             {context_text}
-
             USER QUESTION:
             {query}
             """
-        try:
             response = ollama.chat(
                 model="llama3.2:1b",
                 messages=[{"role": "user", "content": prompt}]
