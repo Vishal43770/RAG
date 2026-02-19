@@ -88,26 +88,37 @@ class RAGEvaluator:
                 print("   ⚠️ No chunks found. Skipping metrics.")
                 continue
 
-            # Limit to top 10 as per current deep search logic
+            # NEW: Database-level metrics (Hard values)
             top_chunks = content_chunks[:10]
+            scores = [c.get('score', 0.0) for c in top_chunks]
+            max_score = max(scores) if scores else 0.0
+            avg_score = sum(scores)/len(scores) if scores else 0.0
+            unique_urls = len(set([c.get('url', 'N/A') for c in top_chunks]))
+            total_chars = sum([len(c.get('text', '')) for c in top_chunks])
+
             context_text = "\n\n".join([f"Source: {c.get('url', 'N/A')}\nContent: {c['text']}" for c in top_chunks])
             
             ai_response = self.rag.ollama_chat(query, top_chunks)
             total_time = time.time() - start_time
 
             # 2. Get Metrics from Groq
-            scores = self.evaluate_response(query, context_text, ai_response)
+            eval_scores = self.evaluate_response(query, context_text, ai_response)
             
-            if scores:
+            if eval_scores:
                 results.append({
                     "query": query,
-                    "faithfulness": scores.get('faithfulness', 0.0),
-                    "relevance": scores.get('relevance', 0.0),
-                    "precision": scores.get('precision', 0.0),
+                    "faithfulness": eval_scores.get('faithfulness', 0.0),
+                    "relevance": eval_scores.get('relevance', 0.0),
+                    "precision": eval_scores.get('precision', 0.0),
+                    "max_db_score": round(max_score, 4),
+                    "avg_db_score": round(avg_score, 4),
+                    "unique_sources": unique_urls,
+                    "context_length": total_chars,
                     "latency": round(total_time, 2),
-                    "reasoning": scores.get('reasoning', "N/A")
+                    "reasoning": eval_scores.get('reasoning', "N/A")
                 })
-                print(f"   ✅ Scores: F:{scores.get('faithfulness')} | R:{scores.get('relevance')} | P:{scores.get('precision')}")
+                print(f"   ✅ Scores: F:{eval_scores.get('faithfulness')} | R:{eval_scores.get('relevance')} | P:{eval_scores.get('precision')}")
+                print(f"   📊 DB Values: Max Score:{round(max_score, 3)} | Sources:{unique_urls} | Chars:{total_chars}")
             else:
                 print("   ❌ Evaluation failed.")
 
@@ -120,11 +131,17 @@ class RAGEvaluator:
         print("\n" + "="*70)
         print("📊 FINAL EVALUATION REPORT")
         print("="*70)
-        print(f"Total Queries Tested : {len(results)}")
-        print(f"Avg Faithfulness      : {df['faithfulness'].mean():.2f}")
-        print(f"Avg Answer Relevance  : {df['relevance'].mean():.2f}")
-        print(f"Avg Context Precision : {df['precision'].mean():.2f}")
-        print(f"Avg Latency           : {df['latency'].mean():.2f}s")
+        print(f"Total Queries Tested  : {len(results)}")
+        print(f"Avg Faithfulness       : {df['faithfulness'].mean():.2f}")
+        print(f"Avg Answer Relevance   : {df['relevance'].mean():.2f}")
+        print(f"Avg Context Precision  : {df['precision'].mean():.2f}")
+        print("-" * 35)
+        print(f"Avg Top-1 DB Score    : {df['max_db_score'].mean():.4f}")
+        print(f"Avg Context Score     : {df['avg_db_score'].mean():.4f}")
+        print(f"Avg Unique Sources    : {df['unique_sources'].mean():.1f}")
+        print(f"Avg Context Length    : {df['context_length'].mean():.0f} chars")
+        print("-" * 35)
+        print(f"Avg Latency            : {df['latency'].mean():.2f}s")
         print("="*70)
         
         # Save to CSV
